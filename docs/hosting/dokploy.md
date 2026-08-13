@@ -291,7 +291,7 @@ curl -fsS -X POST https://dokploy.mrwilde.dev/api/compose.deploy \
 Secrets (`SECRET_KEY_BASE`, `POSTGRES_PASSWORD`, the `ACTIVE_RECORD_ENCRYPTION_*` triple) live only in the Dokploy
 compose env and the password manager.
 
-First end-to-end run (commit `b211db56`): `Publish Docker image` 11m25s green → `Deploy to Dokploy` green, with
+First end-to-end run (2026-08-13): `Publish Docker image` 11m25s green → `Deploy to Dokploy` green, with
 `composeStatus` observed as `idle` (pre-deploy) → `running` → `done`, all five containers up (`web`, `worker`, `db`,
 `redis` healthy; `backup` running — the stripped `profiles` key is what makes it start), and
 `https://sure.mrwilde.dev/up` → 200 on a Let's Encrypt cert. GHCR published `ghcr.io/robwilde/sure-finance` **public**
