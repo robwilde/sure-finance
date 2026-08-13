@@ -204,6 +204,9 @@ en:
         preview:
           title: Enable preview features
           description: Opt in to in-progress features tagged preview or canary.
+        rule_prompts:
+          title: Suggest rules when categorizing
+          description: After you change a transaction's category, offer to create a rule that categorizes similar transactions automatically.
     profiles:
       destroy:
         cannot_remove_self: You cannot remove yourself from the account.

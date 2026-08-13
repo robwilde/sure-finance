@@ -50,4 +50,16 @@ class Settings::PreferencesControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to settings_preferences_url
     assert_not user.reload.preview_features_enabled?
   end
+
+  test "renders rule suggestion toggle reflecting the user's setting" do
+    user = users(:family_admin)
+
+    get settings_preferences_url
+    assert_select "input#user_rule_prompts_enabled[checked='checked']"
+
+    user.update!(rule_prompts_disabled: true)
+
+    get settings_preferences_url
+    assert_select "input#user_rule_prompts_enabled[checked='checked']", count: 0
+  end
 end
