@@ -26,9 +26,14 @@ apps (PasswordPusher, Hindsight).
 
 ## Recommended architecture
 
-Use **one Dokploy Compose service** (not four separate Applications). Sure's upstream compose already wires service DNS
-(`db`, `redis`), health checks, and the shared storage volume. Splitting into discrete Dokploy apps forces manual
-internal networking and is easy to get wrong.
+Use **one Dokploy Compose resource** running five containers (`web`, `worker`, `db`, `redis`, `backup`) rather than four
+or five separate Dokploy resources (two Applications + Postgres + Redis). The deciding factor is that `web` and
+`worker` must be byte-identical twins: same image, same env — including `SECRET_KEY_BASE` and the
+`ACTIVE_RECORD_ENCRYPTION_*` triple. As separate Applications that env exists twice and is maintained by hand; a drift
+in the encryption triple silently breaks decryption of every encrypted column. Here one YAML anchor (`*rails_env`)
+feeds both, one image pin recreates both atomically, and `depends_on: condition: service_healthy` orders startup. The
+stack also stays a single file in git (`.dokploy/stack.yml`), diffable against upstream `compose.example.yml`, instead
+of configuration that only exists in Dokploy's database.
 
 ```mermaid
 flowchart LR
@@ -41,6 +46,28 @@ flowchart LR
   web --- vol[app-storage volume]
   worker --- vol
 ```
+
+**What the split would buy, and why it still loses.** Two things are genuinely better as discrete Dokploy resources —
+both were checked against Dokploy v0.29.14 source, and neither survives contact with this app:
+
+- *Image freshness.* An Application with `sourceType: docker` runs an explicit `docker pull` on deploy
+  (`utils/providers/docker.ts:26-31`) and bumps `TaskTemplate.ForceUpdate` so Swarm recreates tasks even on an
+  unchanged spec (`utils/builders/index.ts:181-196`). That is exactly the behaviour Compose lacks (see "CI deploy"). But
+  pinning an immutable `sha-<commit>` tag solves the same problem deterministically *and* makes the running build
+  auditable and one-input rollback-able, which pulling a floating tag never is. (Note the trap: `application.redeploy`
+  does **not** pull — `rebuildApplication`, `services/application.ts:299-322` — so on Applications you must always use
+  `deploy`.)
+- *Managed Postgres backups.* The `postgres` resource type has cron-scheduled backups
+  (`db/schema/backups.ts:35-102`, `utils/backups/utils.ts:16-54`), but `destinationId` is NOT NULL and `destinations`
+  is pure S3 (`db/schema/destination.ts:13-30`) — there is no local-filesystem target, which is what this host has. And
+  the same feature supports `backupType: "compose"` with a `serviceName` (`db/schema/backups.ts:33,48,86-102`), so once
+  an S3 bucket exists it can back up the `db` service *inside this compose stack* and replace the
+  `prodrigestivill/postgres-backup-local` sidecar — no restructuring required.
+
+Two claims that would be wrong to make here: separate Applications *can* share one named volume (`volumeName` is
+free-form with no namespacing, `db/schema/mount.ts:36`, `utils/docker/utils.ts:498-510`; single-node only), and they
+*would* reach each other over `dokploy-network` by generated `appName`. Neither is a reason to avoid the split — the
+env-duplication and atomicity arguments above are.
 
 **Why not the MCP-only path?** MCP can create Postgres + Application, but not Redis or a multi-container compose file. A
 single GHCR image still needs Redis for Sidekiq/imports.
