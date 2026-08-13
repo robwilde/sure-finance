@@ -62,4 +62,13 @@ class Settings::PreferencesControllerTest < ActionDispatch::IntegrationTest
     get settings_preferences_url
     assert_select "input#user_rule_prompts_enabled[checked='checked']", count: 0
   end
+
+  test "rule suggestion toggle is labelled without nesting it in a label" do
+    get settings_preferences_url
+
+    assert_select "input#user_rule_prompts_enabled[aria-labelledby='rule_prompts_title'][aria-describedby='rule_prompts_description']"
+    assert_select "p#rule_prompts_title"
+    assert_select "p#rule_prompts_description"
+    assert_select "label input#user_rule_prompts_enabled", count: 0
+  end
 end
