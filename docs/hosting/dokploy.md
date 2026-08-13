@@ -11,8 +11,8 @@ apps (PasswordPusher, Hindsight).
   `compose.example.yml`).
 - **Stack required:** `web` + `worker` (Sidekiq) + Postgres 16 + Redis. Shared volume for Active Storage
   (`app-storage`).
-- **Image:** `ghcr.io/robwilde/sure-finance:prod` — built from fork `main` by `.github/workflows/publish.yml` and
-  retagged by `.github/workflows/deploy-dokploy.yml`. See "CI deploy".
+- **Image:** `ghcr.io/robwilde/sure-finance:sha-<40hex>` — built from fork `main` by `.github/workflows/publish.yml`,
+  pinned into the compose file per deploy by `.github/workflows/deploy-dokploy.yml`. See "CI deploy".
 - **Dokploy:** Reachable at `https://dokploy.mrwilde.dev/api` (publicly, valid TLS). Auth header is `x-api-key` (Bearer
   returns 401).
 - **API key location (local):** `DOKPLOY_URL` / `DOKPLOY_API_KEY` in `~/.claude.json` under the dokploy-mcp env block.
@@ -54,13 +54,14 @@ single GHCR image still needs Redis for Sidekiq/imports.
 | Compose service name | `sure`                           | Dokploy compose resource                                 |
 | Public host          | `sure.mrwilde.dev`               | Confirm DNS A/AAAA → Dokploy server public IP            |
 | `APP_DOMAIN`         | `sure.mrwilde.dev`               | **Required.** Mailer host + WebAuthn RP-ID fallback      |
-| Image tag            | `ghcr.io/robwilde/sure-finance:prod` | Floating tag moved per deploy by `deploy-dokploy.yml`  |
+| Image tag            | `ghcr.io/robwilde/sure-finance:sha-<40hex>` | Immutable per deploy; see "CI deploy"     |
 | Container port       | `3000`                           | Domain → service `web`, port 3000                        |
 | SSL                  | Let's Encrypt + HTTPS            | Leave both SSL env vars unset; defaults are correct      |
 
 ## Compose file to load into Dokploy
 
-Adapt from `compose.example.yml`. Important deltas for Dokploy/Traefik:
+Live file: `.dokploy/stack.yml` (repo root), uploaded to Dokploy on every deploy with `__IMAGE__` substituted. It was
+adapted from `compose.example.yml`; important deltas for Dokploy/Traefik:
 
 - Do **not** publish host ports on `web` (Traefik routes internally). If Dokploy requires a port on the domain object,
   set domain port `3000` and `serviceName: web`.
@@ -86,7 +87,7 @@ Adapt from `compose.example.yml`. Important deltas for Dokploy/Traefik:
 
 Minimal service set:
 
-1. `web` — image `:prod`, env from rails block, volume `app-storage`, depends_on healthy db+redis, DNS 8.8.8.8/1.1.1.1 if
+1. `web` — pinned image, env from rails block, volume `app-storage`, depends_on healthy db+redis, DNS 8.8.8.8/1.1.1.1 if
    Yahoo/provider IPv6 issues appear. **Add a health check** — upstream defines none for `web`, and `GET /up` exists
    (`config/routes.rb:815`), so Traefik will otherwise route to a still-booting container.
 2. `worker` — same image, `command: bundle exec sidekiq`, same env + volume. It does **not** migrate:
@@ -244,17 +245,40 @@ Auto-deploy runs on every green push to fork `main`; no manual step.
 
 ```
 push main
-  → publish.yml   (CI, then native amd64+arm64 build, ~30-60 min)
+  → publish.yml   (CI, then native amd64+arm64 build, ~11 min observed)
                   pushes ghcr.io/robwilde/sure-finance:sha-<40hex>
   → deploy-dokploy.yml  (workflow_run: "Publish Docker image" success, push events only)
-      docker buildx imagetools create -t …:prod …:sha-<sha>   (retag, no rebuild)
-      POST $DOKPLOY_URL/compose.deploy
-      poll compose.one until composeStatus=done
+      render .dokploy/stack.yml  (__IMAGE__ → …:sha-<sha>)
+      POST compose.update          (composeFile only; Dokploy keeps the env block)
+      POST compose.deploy
+      poll deployment.allByCompose for the NEW deployment row → done
+      assert the running web container's image id == the built manifest's config digest
       curl https://sure.mrwilde.dev/up
 ```
 
 `publish.yml` is deliberately unmodified (keeps upstream merges clean); the nightly `schedule` build tags `nightly`, not
 `sha-*`, and the `github.event.workflow_run.event == 'push'` guard stops it deploying.
+
+### Why the image tag is immutable per deploy
+
+Dokploy's compose deploy runs exactly `docker compose -p <appName> -f docker-compose.yml up -d --build --remove-orphans`
+(`packages/server/src/utils/builders/compose.ts:102` in Dokploy v0.29.14) — **no `pull`, no `--force-recreate`, no
+`down`**. For an `image:`-only service that means Compose consults the local image store, finds the tag already present
+at its old digest, sees an unchanged service config hash, and leaves the container running. A floating tag therefore
+deploys **nothing** while still reporting success. Observed here: moving `:prod` to a new build left `web` running the
+previous image (container image id unchanged, uptime unbroken) after a `done` deployment.
+
+So the stack definition lives in `.dokploy/stack.yml` with an `__IMAGE__` placeholder, and each deploy uploads a
+compose file pinned to `sha-<deployed sha>`. The changed image reference is what makes Compose pull and recreate — and
+only `web`/`worker` are recreated; `db`, `redis` and `backup` keep running. The repo file is the source of truth for the
+stack; Dokploy holds only the env block (secrets). Editing the compose file in the Dokploy UI is pointless — the next
+deploy overwrites it.
+
+The other trap in the same area: `composeStatus` is written **asynchronously** by Dokploy's in-process queue worker
+(`apps/dokploy/server/queues/deployments-queue.ts:36-39`), and stays at the previous terminal value until then. Polling
+`compose.one` for `composeStatus == "done"` right after `compose.deploy` can therefore pass instantly on the *previous*
+deployment's status. The workflow polls `deployment.allByCompose` for a deployment row that did not exist before the
+POST.
 
 Repo config on `robwilde/sure-finance`:
 
@@ -263,19 +287,15 @@ Repo config on `robwilde/sure-finance`:
 | `DOKPLOY_API_KEY` | secret | Dokploy API key |
 | `DOKPLOY_URL` | variable | `https://dokploy.mrwilde.dev/api` |
 | `DOKPLOY_COMPOSE_ID` | variable | `WLulD4FY056MI-9H2hjbZ` |
+| `DOKPLOY_APP_NAME` | variable | `compose-generate-wireless-panel-nunh1v` |
 
-Manual deploy: `gh workflow run deploy-dokploy.yml -R robwilde/sure-finance` (retags whatever `sha-<HEAD>` exists).
-
-Rollback — retag an older build and redeploy:
+Manual deploy / rollback — the workflow takes an optional `sha` input and deploys `sha-<that sha>`:
 
 ```bash
-docker buildx imagetools create \
-  -t ghcr.io/robwilde/sure-finance:prod \
-  ghcr.io/robwilde/sure-finance:sha-<old-40hex>
-curl -fsS -X POST https://dokploy.mrwilde.dev/api/compose.deploy \
-  -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"composeId": "WLulD4FY056MI-9H2hjbZ"}'
+gh workflow run deploy-dokploy.yml -R robwilde/sure-finance -f sha=<40hex>
 ```
+
+Any commit whose `publish.yml` run pushed an image is a valid rollback target; no local Docker needed.
 
 ### Recorded deployment (2026-08-13)
 
@@ -286,16 +306,17 @@ curl -fsS -X POST https://dokploy.mrwilde.dev/api/compose.deploy \
 | `composeId` | `WLulD4FY056MI-9H2hjbZ` |
 | `appName` | `compose-generate-wireless-panel-nunh1v` |
 | `domainId` | `JbWQwkyx6QIO3oME0xWea` (`sure.mrwilde.dev`) |
-| `sourceType` | `raw` (inline `composeFile`) |
+| `sourceType` | `raw` (inline `composeFile`, rewritten per deploy) |
 
 Secrets (`SECRET_KEY_BASE`, `POSTGRES_PASSWORD`, the `ACTIVE_RECORD_ENCRYPTION_*` triple) live only in the Dokploy
 compose env and the password manager.
 
-First end-to-end run (2026-08-13): `Publish Docker image` 11m25s green → `Deploy to Dokploy` green, with
-`composeStatus` observed as `idle` (pre-deploy) → `running` → `done`, all five containers up (`web`, `worker`, `db`,
-`redis` healthy; `backup` running — the stripped `profiles` key is what makes it start), and
-`https://sure.mrwilde.dev/up` → 200 on a Let's Encrypt cert. GHCR published `ghcr.io/robwilde/sure-finance` **public**
-automatically (public source repo), so no visibility flip or registry credential was needed.
+Bring-up evidence (2026-08-13): `Publish Docker image` green in 11m25s → `Deploy to Dokploy` green; all five containers
+up (`web`, `db`, `redis` healthy, `worker` and `backup` running — the stripped `profiles` key is what makes `backup`
+start); `https://sure.mrwilde.dev/up` → 200 behind a Let's Encrypt cert. GHCR published
+`ghcr.io/robwilde/sure-finance` **public** automatically (public source repo), so no visibility flip or registry
+credential was needed. The pinned-tag deploy was then verified by hand: `compose.update` + `compose.deploy` recreated
+only `web`/`worker`, and the running container's image id matched the `sha-<sha>` manifest's config digest.
 
 ## Out of scope for first bring-up
 

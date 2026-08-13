@@ -1,15 +1,25 @@
 name: Deploy to Dokploy
 
+# Deploys an immutable image tag: the compose file stored in Dokploy is rewritten
+# to `ghcr.io/<repo>:sha-<sha>` before every deploy. Dokploy only ever runs
+# `docker compose up -d --build --remove-orphans` (no pull, no --force-recreate),
+# so a floating tag would leave the old container running silently.
+
 on:
   workflow_run:
     workflows: ["Publish Docker image"]
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy (40 hex; a sha-<SHA> image must exist). Defaults to the current ref."
+        required: false
+        type: string
 
 permissions:
   contents: read
-  packages: write
+  packages: read
 
 concurrency:
   group: dokploy-deploy
@@ -22,64 +32,152 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       IMAGE: ghcr.io/${{ github.repository }}
+      REPO: ${{ github.repository }}
     steps:
-      - name: Log in to the container registry
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Resolve build SHA
         id: sha
         env:
           EVENT_NAME: ${{ github.event_name }}
+          INPUT_SHA: ${{ inputs.sha }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
-          PUSH_SHA: ${{ github.sha }}
+          REF_SHA: ${{ github.sha }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_run" ]; then
-            echo "sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ -n "$INPUT_SHA" ]; then
+            sha="$INPUT_SHA"
+          elif [ "$EVENT_NAME" = "workflow_run" ]; then
+            sha="$RUN_SHA"
           else
-            echo "sha=$PUSH_SHA" >> "$GITHUB_OUTPUT"
+            sha="$REF_SHA"
           fi
+          printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "Not a 40-hex commit SHA: $sha" >&2
+            exit 1
+          }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-      - name: Retag build as :prod
+      - name: Check out the compose template
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ steps.sha.outputs.sha }}
+
+      - name: Render compose file
         env:
           SHA: ${{ steps.sha.outputs.sha }}
-        run: docker buildx imagetools create -t "$IMAGE:prod" "$IMAGE:sha-$SHA"
+        run: |
+          set -euo pipefail
+          ref="$IMAGE:sha-$SHA"
+          sed "s|__IMAGE__|$ref|g" .dokploy/stack.yml > "$RUNNER_TEMP/compose.yml"
+          count=$(grep -c -F "image: $ref" "$RUNNER_TEMP/compose.yml")
+          if [ "$count" -ne 2 ]; then
+            echo "Expected 2 pinned image references, found $count" >&2
+            exit 1
+          fi
+          if grep -q '__IMAGE__' "$RUNNER_TEMP/compose.yml"; then
+            echo "Unsubstituted placeholder left in compose file" >&2
+            exit 1
+          fi
 
-      - name: Trigger Dokploy deploy
+      - name: Resolve expected image digests
+        id: digests
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          token=$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:$REPO:pull" | jq -r .token)
+          index=$(curl -fsS -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/$REPO/manifests/sha-$SHA")
+          manifests=$(jq -r '.manifests[]? | select(.platform.os == "linux") | .digest' <<<"$index")
+          if [ -z "$manifests" ]; then
+            echo "No linux manifests in image index for sha-$SHA" >&2
+            exit 1
+          fi
+          configs=""
+          for m in $manifests; do
+            cfg=$(curl -fsS -H "Authorization: Bearer $token" \
+              -H 'Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/$REPO/manifests/$m" | jq -r '.config.digest')
+            configs="$configs $cfg"
+          done
+          echo "Expected image ids:$configs"
+          echo "configs=${configs# }" >> "$GITHUB_OUTPUT"
+
+      - name: Pin the image in Dokploy
         env:
           DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
           DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
           COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
         run: |
-          curl -fsS -X POST "$DOKPLOY_URL/compose.deploy" \
-            -H "x-api-key: $DOKPLOY_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{\"composeId\": \"$COMPOSE_ID\"}"
+          set -euo pipefail
+          jq -n --arg cid "$COMPOSE_ID" --rawfile cf "$RUNNER_TEMP/compose.yml" \
+            '{composeId: $cid, sourceType: "raw", composeFile: $cf}' > "$RUNNER_TEMP/update.json"
+          curl -fsS -X POST "$DOKPLOY_URL/compose.update" \
+            -H "x-api-key: $DOKPLOY_API_KEY" -H 'Content-Type: application/json' \
+            --data-binary "@$RUNNER_TEMP/update.json" > /dev/null
 
-      - name: Wait for Dokploy
+      - name: Deploy and wait
         env:
           DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
           DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
           COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          for i in $(seq 1 40); do
-            sleep 15
-            status=$(curl -fsS "$DOKPLOY_URL/compose.one?composeId=$COMPOSE_ID" \
-              -H "x-api-key: $DOKPLOY_API_KEY" | jq -r '.composeStatus')
-            echo "composeStatus=$status"
+          set -euo pipefail
+          api() { curl -fsS "$@" -H "x-api-key: $DOKPLOY_API_KEY"; }
+          before=$(api "$DOKPLOY_URL/deployment.allByCompose?composeId=$COMPOSE_ID" | jq -c '[.[].deploymentId]')
+          api -X POST "$DOKPLOY_URL/compose.deploy" -H 'Content-Type: application/json' \
+            -d "{\"composeId\": \"$COMPOSE_ID\", \"title\": \"GHA run $RUN_ID\", \"description\": \"sha-$SHA\"}" > /dev/null
+          # composeStatus is written asynchronously by Dokploy's queue worker and keeps the
+          # previous terminal value until then, so track the new deployment row instead.
+          for _ in $(seq 1 60); do
+            sleep 10
+            row=$(api "$DOKPLOY_URL/deployment.allByCompose?composeId=$COMPOSE_ID" \
+              | jq -c --argjson before "$before" \
+                'map(select(.deploymentId as $id | ($before | index($id)) == null))
+                 | sort_by(.createdAt) | last // {}')
+            status=$(jq -r '.status // "pending"' <<<"$row")
+            echo "deployment status=$status"
             case "$status" in
               done) exit 0 ;;
-              error) echo "Dokploy deploy failed" >&2; exit 1 ;;
+              error|cancelled) echo "Dokploy deployment $status" >&2; exit 1 ;;
             esac
           done
-          echo "Timed out waiting for Dokploy" >&2
+          echo "Timed out waiting for the Dokploy deployment" >&2
+          exit 1
+
+      - name: Verify the running image
+        env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          APP_NAME: ${{ vars.DOKPLOY_APP_NAME }}
+          EXPECTED: ${{ steps.digests.outputs.configs }}
+        run: |
+          set -euo pipefail
+          api() { curl -fsS "$@" -H "x-api-key: $DOKPLOY_API_KEY"; }
+          web=$(api "$DOKPLOY_URL/docker.getContainersByAppNameMatch?appName=$APP_NAME" \
+            | jq -r '.[] | select(.name | endswith("web-1")) | .containerId')
+          if [ -z "$web" ]; then
+            echo "No web container found for $APP_NAME" >&2
+            exit 1
+          fi
+          running=$(api "$DOKPLOY_URL/docker.getConfig?containerId=$web" | jq -r '.Image')
+          echo "running image id: $running"
+          for cfg in $EXPECTED; do
+            if [ "$running" = "$cfg" ]; then
+              echo "Running image matches the deployed build."
+              exit 0
+            fi
+          done
+          echo "Running image $running is not the deployed build ($EXPECTED)" >&2
           exit 1
 
       - name: Smoke test
-        run: curl -fsS --retry 10 --retry-delay 6 --retry-all-errors https://sure.mrwilde.dev/up > /dev/null
+        run: curl -fsS --retry 30 --retry-delay 5 --retry-all-errors https://sure.mrwilde.dev/up > /dev/null
