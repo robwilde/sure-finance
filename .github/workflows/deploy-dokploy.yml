@@ -1,0 +1,85 @@
+name: Deploy to Dokploy
+
+on:
+  workflow_run:
+    workflows: ["Publish Docker image"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: dokploy-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Log in to the container registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve build SHA
+        id: sha
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            echo "sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$PUSH_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retag build as :prod
+        env:
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: docker buildx imagetools create -t "$IMAGE:prod" "$IMAGE:sha-$SHA"
+
+      - name: Trigger Dokploy deploy
+        env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+        run: |
+          curl -fsS -X POST "$DOKPLOY_URL/compose.deploy" \
+            -H "x-api-key: $DOKPLOY_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"composeId\": \"$COMPOSE_ID\"}"
+
+      - name: Wait for Dokploy
+        env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+        run: |
+          for i in $(seq 1 40); do
+            sleep 15
+            status=$(curl -fsS "$DOKPLOY_URL/compose.one?composeId=$COMPOSE_ID" \
+              -H "x-api-key: $DOKPLOY_API_KEY" | jq -r '.composeStatus')
+            echo "composeStatus=$status"
+            case "$status" in
+              done) exit 0 ;;
+              error) echo "Dokploy deploy failed" >&2; exit 1 ;;
+            esac
+          done
+          echo "Timed out waiting for Dokploy" >&2
+          exit 1
+
+      - name: Smoke test
+        run: curl -fsS --retry 10 --retry-delay 6 --retry-all-errors https://sure.mrwilde.dev/up > /dev/null
