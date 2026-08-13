@@ -176,27 +176,50 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert_enqueued_with(job: UserPurgeJob, args: [ @admin ])
   end
 
-  test "preferences toggle re-enables rule prompts and clears the dismissal cooldown" do
-    @user.update!(rule_prompts_disabled: true, rule_prompt_dismissed_at: Time.current)
+  test "skipping a category leaves prompts on for every other category" do
+    skipped = categories(:food_and_drink)
 
     patch rule_prompt_settings_user_url(@user), params: {
-      user: { rule_prompts_disabled: "0", rule_prompt_dismissed_at: "" }
+      user: { dismissed_rule_prompt_category_id: skipped.id }
     }
 
     @user.reload
     assert_not @user.rule_prompts_disabled
-    assert_nil @user.rule_prompt_dismissed_at
+    assert @user.rule_prompt_dismissed_for?(skipped.id)
+    assert_not @user.rule_prompt_dismissed_for?(categories(:income).id)
   end
 
-  test "cta dismissal keeps its cooldown timestamp" do
-    dismissed_at = Time.current
+  test "skipping the same category twice does not duplicate it" do
+    skipped = categories(:food_and_drink)
+
+    2.times do
+      patch rule_prompt_settings_user_url(@user), params: {
+        user: { dismissed_rule_prompt_category_id: skipped.id }
+      }
+    end
+
+    assert_equal [ skipped.id ], @user.reload.dismissed_rule_prompt_category_ids
+  end
+
+  test "opting out of every prompt from the cta disables prompts and skips the category" do
+    skipped = categories(:food_and_drink)
 
     patch rule_prompt_settings_user_url(@user), params: {
-      user: { rule_prompts_disabled: "0", rule_prompt_dismissed_at: dismissed_at }
+      user: { rule_prompts_enabled: "0", dismissed_rule_prompt_category_id: skipped.id }
     }
 
     @user.reload
+    assert @user.rule_prompts_disabled
+    assert @user.rule_prompt_dismissed_for?(skipped.id)
+  end
+
+  test "preferences toggle re-enables prompts and clears skipped categories" do
+    @user.update!(rule_prompts_disabled: true, dismissed_rule_prompt_category_ids: [ categories(:food_and_drink).id ])
+
+    patch rule_prompt_settings_user_url(@user), params: { user: { rule_prompts_enabled: "1" } }
+
+    @user.reload
     assert_not @user.rule_prompts_disabled
-    assert_in_delta dismissed_at, @user.rule_prompt_dismissed_at, 1.second
+    assert_empty @user.dismissed_rule_prompt_category_ids
   end
 end

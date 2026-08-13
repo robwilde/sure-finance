@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_08_12_000000) do
+ActiveRecord::Schema[7.2].define(version: 2026_08_14_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pgcrypto"
   enable_extension "plpgsql"
@@ -2233,7 +2233,6 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_12_000000) do
     t.boolean "ai_enabled", default: false, null: false
     t.string "theme", default: "system"
     t.boolean "rule_prompts_disabled", default: false
-    t.datetime "rule_prompt_dismissed_at"
     t.text "goals", default: [], array: true
     t.datetime "set_onboarding_preferences_at"
     t.datetime "set_onboarding_goals_at"
@@ -2243,6 +2242,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_08_12_000000) do
     t.string "locale"
     t.uuid "default_account_id"
     t.string "webauthn_id"
+    t.uuid "dismissed_rule_prompt_category_ids", default: [], null: false, array: true
     t.index ["default_account_id"], name: "index_users_on_default_account_id"
     t.index ["email"], name: "index_users_on_email", unique: true
     t.index ["family_id"], name: "index_users_on_family_id"
