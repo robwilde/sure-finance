@@ -15,9 +15,13 @@ module User::RulePromptable
   end
 
   def dismiss_rule_prompt_for!(category_id)
-    return if category_id.blank? || rule_prompt_dismissed_for?(category_id)
+    return if category_id.blank?
 
-    update!(dismissed_rule_prompt_category_ids: dismissed_rule_prompt_category_ids + [ category_id ])
+    with_lock do
+      unless rule_prompt_dismissed_for?(category_id)
+        update!(dismissed_rule_prompt_category_ids: dismissed_rule_prompt_category_ids + [ category_id ])
+      end
+    end
   end
 
   def enable_rule_prompts!
