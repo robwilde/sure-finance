@@ -50,4 +50,25 @@ class Settings::PreferencesControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to settings_preferences_url
     assert_not user.reload.preview_features_enabled?
   end
+
+  test "renders rule suggestion toggle reflecting the user's setting" do
+    user = users(:family_admin)
+
+    get settings_preferences_url
+    assert_select "input#user_rule_prompts_enabled[checked='checked']"
+
+    user.update!(rule_prompts_disabled: true)
+
+    get settings_preferences_url
+    assert_select "input#user_rule_prompts_enabled[checked='checked']", count: 0
+  end
+
+  test "rule suggestion toggle is labelled without nesting it in a label" do
+    get settings_preferences_url
+
+    assert_select "input#user_rule_prompts_enabled[aria-labelledby='rule_prompts_title'][aria-describedby='rule_prompts_description']"
+    assert_select "p#rule_prompts_title"
+    assert_select "p#rule_prompts_description"
+    assert_select "label input#user_rule_prompts_enabled", count: 0
+  end
 end

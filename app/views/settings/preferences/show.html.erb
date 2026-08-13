@@ -200,6 +200,29 @@
   <% end %>
 <% end %>
 
+<%= settings_section do %>
+  <%= form_with model: @user, url: rule_prompt_settings_user_path(@user), method: :patch,
+        data: { controller: "auto-submit-form" } do |f| %>
+    <%= f.hidden_field :rule_prompt_dismissed_at, value: "" %>
+    <div class="flex items-center gap-4 justify-between">
+      <div class="text-sm space-y-1">
+        <p id="rule_prompts_title" class="text-primary font-medium"><%= t(".rule_prompts.title") %></p>
+        <p id="rule_prompts_description" class="text-secondary"><%= t(".rule_prompts.description") %></p>
+      </div>
+      <%= render DS::Toggle.new(
+            id: "user_rule_prompts_enabled",
+            name: "user[rule_prompts_disabled]",
+            checked_value: "0",
+            unchecked_value: "1",
+            checked: !@user.rule_prompts_disabled?,
+            "aria-labelledby": "rule_prompts_title",
+            "aria-describedby": "rule_prompts_description",
+            data: { auto_submit_form_target: "auto" }
+      ) %>
+    </div>
+  <% end %>
+<% end %>
+
 <%# Preview features toggle — visible to all users, not just admins. Lives at
     the bottom of Preferences as a standalone card (no section header) so the
     toggle row is the entire surface. Posts directly to

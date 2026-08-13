@@ -175,4 +175,28 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert_not User.find(@admin.id).active?
     assert_enqueued_with(job: UserPurgeJob, args: [ @admin ])
   end
+
+  test "preferences toggle re-enables rule prompts and clears the dismissal cooldown" do
+    @user.update!(rule_prompts_disabled: true, rule_prompt_dismissed_at: Time.current)
+
+    patch rule_prompt_settings_user_url(@user), params: {
+      user: { rule_prompts_disabled: "0", rule_prompt_dismissed_at: "" }
+    }
+
+    @user.reload
+    assert_not @user.rule_prompts_disabled
+    assert_nil @user.rule_prompt_dismissed_at
+  end
+
+  test "cta dismissal keeps its cooldown timestamp" do
+    dismissed_at = Time.current
+
+    patch rule_prompt_settings_user_url(@user), params: {
+      user: { rule_prompts_disabled: "0", rule_prompt_dismissed_at: dismissed_at }
+    }
+
+    @user.reload
+    assert_not @user.rule_prompts_disabled
+    assert_in_delta dismissed_at, @user.rule_prompt_dismissed_at, 1.second
+  end
 end
