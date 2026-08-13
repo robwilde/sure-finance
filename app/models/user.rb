@@ -1,5 +1,5 @@
 class User < ApplicationRecord
-  include Encryptable
+  include Encryptable, User::RulePromptable
 
   # Allow nil password for SSO-only users (JIT provisioning).
   # Custom validation ensures password is present for non-SSO registration.

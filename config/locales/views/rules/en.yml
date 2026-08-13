@@ -1,6 +1,12 @@
 ---
 en:
   rules:
+    category_rule_cta:
+      message: Updated to %{category}
+      description: You can create a rule to automatically categorize transactions like this one
+      disable_all: Don't show this again for any category
+      skip_category: Skip this category
+      create_rule: Create rule
     no_action: No Action
     no_condition: No condition
     rule:

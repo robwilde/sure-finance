@@ -206,7 +206,7 @@ en:
           description: Opt in to in-progress features tagged preview or canary.
         rule_prompts:
           title: Suggest rules when categorizing
-          description: After you change a transaction's category, offer to create a rule that categorizes similar transactions automatically.
+          description: After you change a transaction's category, offer to create a rule that categorizes similar transactions automatically. Switching this on again also clears any categories you skipped.
     profiles:
       destroy:
         cannot_remove_self: You cannot remove yourself from the account.

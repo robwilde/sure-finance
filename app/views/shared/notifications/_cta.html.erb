@@ -16,5 +16,16 @@
 
       <%= yield %>
     </div>
+
+    <div class="absolute top-1 right-1">
+      <%= render DS::Button.new(
+        variant: "icon",
+        size: "sm",
+        icon: "x",
+        type: "button",
+        "aria-label": t("defaults.common.close"),
+        data: { action: "click->element-removal#remove" }
+      ) %>
+    </div>
   <% end %>
 </div>

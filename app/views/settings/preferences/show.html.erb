@@ -201,9 +201,8 @@
 <% end %>
 
 <%= settings_section do %>
-  <%= form_with model: @user, url: rule_prompt_settings_user_path(@user), method: :patch,
-        data: { controller: "auto-submit-form" } do |f| %>
-    <%= f.hidden_field :rule_prompt_dismissed_at, value: "" %>
+  <%= form_with url: rule_prompt_settings_user_path(@user), method: :patch,
+        data: { controller: "auto-submit-form" } do %>
     <div class="flex items-center gap-4 justify-between">
       <div class="text-sm space-y-1">
         <p id="rule_prompts_title" class="text-primary font-medium"><%= t(".rule_prompts.title") %></p>
@@ -211,9 +210,7 @@
       </div>
       <%= render DS::Toggle.new(
             id: "user_rule_prompts_enabled",
-            name: "user[rule_prompts_disabled]",
-            checked_value: "0",
-            unchecked_value: "1",
+            name: "user[rule_prompts_enabled]",
             checked: !@user.rule_prompts_disabled?,
             "aria-labelledby": "rule_prompts_title",
             "aria-describedby": "rule_prompts_description",

@@ -74,6 +74,19 @@ class TransactionsControllerTest < ActionDispatch::IntegrationTest
     assert_enqueued_with(job: SyncJob)
   end
 
+  test "rule prompt from this controller seeds the rule name with the entry name" do
+    patch transaction_url(@entry), params: {
+      entry: {
+        entryable_type: @entry.entryable_type,
+        entryable_attributes: { id: @entry.entryable_id, category_id: categories(:income).id }
+      }
+    }, as: :turbo_stream
+
+    assert_response :success
+    assert_match "You can create a rule to automatically categorize transactions like this one", response.body
+    assert_match "name=#{CGI.escape(@entry.name)}", response.body
+  end
+
   test "transaction count represents filtered total" do
     family = families(:empty)
     sign_in users(:empty)

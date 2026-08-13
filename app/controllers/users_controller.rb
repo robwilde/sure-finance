@@ -72,7 +72,18 @@ class UsersController < ApplicationController
   end
 
   def rule_prompt_settings
-    @user.update!(rule_prompt_settings_params)
+    prefs = rule_prompt_settings_params
+
+    if prefs.key?(:rule_prompts_enabled)
+      if ActiveModel::Type::Boolean.new.cast(prefs[:rule_prompts_enabled])
+        @user.enable_rule_prompts!
+      else
+        @user.disable_rule_prompts!
+      end
+    end
+
+    @user.dismiss_rule_prompt_for!(prefs[:dismissed_rule_prompt_category_id])
+
     redirect_back_or_to settings_profile_path
   end
 
@@ -108,7 +119,7 @@ class UsersController < ApplicationController
     end
 
     def rule_prompt_settings_params
-      params.require(:user).permit(:rule_prompt_dismissed_at, :rule_prompts_disabled)
+      params.require(:user).permit(:rule_prompts_enabled, :dismissed_rule_prompt_category_id)
     end
 
     def user_params
