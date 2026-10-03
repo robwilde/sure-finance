@@ -1,6 +1,94 @@
 require "test_helper"
 
 class TransactionTest < ActiveSupport::TestCase
+  include EntriesTestHelper
+
+  test "existing_manual_recurring_transaction finds a match by merchant" do
+    family = families(:empty)
+    account = family.accounts.create! name: "Test", balance: 0, currency: "USD", accountable: Depository.new
+    merchant = family.merchants.create! name: "Test Merchant"
+    entry = create_transaction(account: account, amount: 100, merchant: merchant)
+    transaction = entry.entryable
+
+    recurring = family.recurring_transactions.create!(
+      account: account,
+      merchant: merchant,
+      amount: entry.amount,
+      currency: entry.currency,
+      expected_day_of_month: entry.date.day,
+      last_occurrence_date: entry.date,
+      next_expected_date: 1.month.from_now,
+      status: "active",
+      manual: true,
+      occurrence_count: 1
+    )
+
+    assert_equal recurring, transaction.existing_manual_recurring_transaction
+  end
+
+  test "existing_manual_recurring_transaction finds a match by name when no merchant" do
+    family = families(:empty)
+    account = family.accounts.create! name: "Test", balance: 0, currency: "USD", accountable: Depository.new
+    entry = create_transaction(account: account, amount: 50, name: "Netflix")
+    transaction = entry.entryable
+
+    recurring = family.recurring_transactions.create!(
+      account: account,
+      name: "Netflix",
+      amount: entry.amount,
+      currency: entry.currency,
+      expected_day_of_month: entry.date.day,
+      last_occurrence_date: entry.date,
+      next_expected_date: 1.month.from_now,
+      status: "active",
+      manual: true,
+      occurrence_count: 1
+    )
+
+    assert_equal recurring, transaction.existing_manual_recurring_transaction
+  end
+
+  test "existing_manual_recurring_transaction returns nil when no manual recurring transaction matches" do
+    family = families(:empty)
+    account = family.accounts.create! name: "Test", balance: 0, currency: "USD", accountable: Depository.new
+    other_account = family.accounts.create! name: "Other", balance: 0, currency: "USD", accountable: Depository.new
+    merchant = family.merchants.create! name: "Test Merchant"
+    other_merchant = family.merchants.create! name: "Other Merchant"
+    entry = create_transaction(account: account, amount: 100, merchant: merchant)
+    transaction = entry.entryable
+
+    base_attrs = {
+      expected_day_of_month: entry.date.day,
+      last_occurrence_date: entry.date,
+      next_expected_date: 1.month.from_now,
+      status: "active",
+      occurrence_count: 1
+    }
+
+    # Differs by account
+    family.recurring_transactions.create!(base_attrs.merge(
+      account: other_account, merchant: merchant, amount: entry.amount, currency: entry.currency, manual: true
+    ))
+    # Differs by merchant
+    family.recurring_transactions.create!(base_attrs.merge(
+      account: account, merchant: other_merchant, amount: entry.amount, currency: entry.currency, manual: true
+    ))
+    # Differs by amount
+    family.recurring_transactions.create!(base_attrs.merge(
+      account: account, merchant: merchant, amount: entry.amount + 1, currency: entry.currency, manual: true
+    ))
+    # Differs by currency
+    family.recurring_transactions.create!(base_attrs.merge(
+      account: account, merchant: merchant, amount: entry.amount, currency: "EUR", manual: true
+    ))
+    # Differs by manual flag
+    family.recurring_transactions.create!(base_attrs.merge(
+      account: account, merchant: merchant, amount: entry.amount, currency: entry.currency, manual: false
+    ))
+
+    assert_nil transaction.existing_manual_recurring_transaction
+  end
+
   test "pending? is true when extra.simplefin.pending is truthy" do
     transaction = Transaction.new(extra: { "simplefin" => { "pending" => true } })
 
@@ -218,5 +306,28 @@ class TransactionTest < ActiveSupport::TestCase
     transaction.enrich_attribute(:category_id, category.id, source: "rule")
 
     assert_nil category.reload.last_used_at
+  end
+
+  test "toggle_tag! adds a missing tag and removes a present one" do
+    transaction = transactions(:one)
+    transaction.update!(tag_ids: [ tags(:one).id ])
+
+    transaction.toggle_tag!(tags(:two))
+    assert_equal [ tags(:one).id, tags(:two).id ].sort, transaction.tag_ids.sort
+
+    transaction.toggle_tag!(tags(:one))
+    assert_equal [ tags(:two).id ], transaction.reload.tag_ids
+  end
+
+  test "toggle_tag! keeps a tag added by a concurrent toggle" do
+    transaction = transactions(:one)
+    transaction.update!(tag_ids: [])
+    stale_copy = Transaction.find(transaction.id)
+    stale_copy.tag_ids # load the pre-toggle snapshot
+
+    transaction.toggle_tag!(tags(:one))
+    stale_copy.toggle_tag!(tags(:two))
+
+    assert_equal [ tags(:one).id, tags(:two).id ].sort, transaction.reload.tag_ids.sort
   end
 end
